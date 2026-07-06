@@ -16,7 +16,12 @@ import google.generativeai as genai
 # ============== KONFIGURASI HALAMAN ==============
 st.set_page_config(page_title="Gems Automator", page_icon="💎", layout="wide")
 
-SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1W6t8fCOPB_dFlWnzHSpVJ66tAnOcHHnMn1jXtHfC2S4/edit?usp=sharing"
+CURRENT_YEAR = datetime.now().year  # used when the screenshot/filename has no year in it
+
+DEFAULT_SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1W6t8fCOPB_dFlWnzHSpVJ66tAnOcHHnMn1jXtHfC2S4/edit?usp=sharing"
+# Allow overriding via .streamlit/secrets.toml so the same code can point at a
+# different sheet per deployment without editing the source.
+SPREADSHEET_URL = st.secrets.get("SPREADSHEET_URL", DEFAULT_SPREADSHEET_URL) if hasattr(st, "secrets") else DEFAULT_SPREADSHEET_URL
 
 # ============== KONEKSI SPREADSHEET VIA SERVICE ACCOUNT ==============
 @st.cache_resource
@@ -86,12 +91,19 @@ def analisis_dengan_ultimate_retry(model, prompt, gambar_list, max_retry=5):
                 raise e
     raise Exception("Gagal total setelah percobaan maksimal.")
 
+@st.cache_resource(show_spinner=False)
+def resolve_gemini_model_name(api_key):
+    """Resolve which Gemini model to use once per API key instead of calling
+    list_models() on every single fallback invocation."""
+    genai.configure(api_key=api_key)
+    models = [m.name for m in genai.list_models() if "generateContent" in m.supported_generation_methods]
+    return next((m for m in models if "1.5-flash" in m), next((m for m in models if "flash" in m), models[0]))
+
 def extract_via_gemini(image_path, api_key):
     if not api_key: return [], []
     try:
+        model_name = resolve_gemini_model_name(api_key)
         genai.configure(api_key=api_key)
-        models = [m.name for m in genai.list_models() if "generateContent" in m.supported_generation_methods]
-        model_name = next((m for m in models if "1.5-flash" in m), next((m for m in models if "flash" in m), models[0]))
         gemini_model = genai.GenerativeModel(model_name)
     except Exception as e:
         st.error(f"⚠️ Gagal setup Gemini: {e}")
@@ -130,8 +142,7 @@ def get_target_cells(tier, vehicle):
     if vehicle_l in ['e-bike', 'bicycle']:
         same_tier_group = ['E-bike', 'Bicycle']
     else:
-        same_tier_group = [vehicle if vehicle_l != 'walker' else 'Walker'] if vehicle_l == 'walker' else [vehicle]
-        same_tier_group = [vehicle.capitalize() if vehicle_l != 'e-bike' else 'E-bike']
+        same_tier_group = [vehicle.capitalize()]
 
     targets = [(tier, v) for v in same_tier_group]
 
@@ -168,7 +179,14 @@ st.divider()
 
 # ============== KONFIGURASI SIDEBAR ==============
 st.sidebar.header("⚙️ Pengaturan")
-gemini_api = st.sidebar.text_input("Gemini API Key (Untuk Fallback Jika OCR Gagal)", type="password")
+# Optional default so collaborators with a key in secrets.toml don't have to
+# paste it in every session; anyone else can still type their own key.
+_default_gemini_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
+gemini_api = st.sidebar.text_input(
+    "Gemini API Key (Untuk Fallback Jika OCR Gagal)",
+    value=_default_gemini_key,
+    type="password",
+)
 
 tier_options = ['Diamond', 'Sapphire', 'Ruby', 'Emerald']
 vehicle_options = ['Walker', 'Motorcycle', 'E-bike', 'Bicycle']
@@ -199,9 +217,11 @@ if uploaded_files and st.button("🚀 Jalankan Ekstraksi", type="primary"):
         filename = uploaded_file.name
 
         with st.expander(f"⚙️ Memproses: {filename}", expanded=True):
+            files_to_cleanup = []
             temp_path = os.path.join(temp_dir, filename)
             with open(temp_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
+            files_to_cleanup.append(temp_path)
 
             img = Image.open(temp_path)
             if img.width > img.height:
@@ -209,6 +229,7 @@ if uploaded_files and st.button("🚀 Jalankan Ekstraksi", type="primary"):
                 img_rotated = img.rotate(90, expand=True)
                 temp_path = os.path.join(temp_dir, "prepared_" + filename)
                 img_rotated.save(temp_path)
+                files_to_cleanup.append(temp_path)
 
             result = reader.readtext(temp_path, detail=0)
             full_text = " ".join(result)
@@ -218,7 +239,7 @@ if uploaded_files and st.button("🚀 Jalankan Ekstraksi", type="primary"):
 
             if fname_match:
                 try:
-                    dt = datetime.strptime(f"{fname_match.group(1)} {fname_match.group(2)[:3].capitalize()} 2026", "%d %b %Y")
+                    dt = datetime.strptime(f"{fname_match.group(1)} {fname_match.group(2)[:3].capitalize()} {CURRENT_YEAR}", "%d %b %Y")
                     extracted_day = dt.strftime("%A")
                     formatted_date = dt.strftime("%d/%m/%Y")
                 except: pass
@@ -227,7 +248,7 @@ if uploaded_files and st.button("🚀 Jalankan Ekstraksi", type="primary"):
                 date_match = re.search(r'(\d{1,2})\s*([A-Za-z]{3,9})\s*(\d{4})?', full_text)
                 if date_match:
                     try:
-                        tahun_angka = date_match.group(3) if date_match.group(3) else "2026"
+                        tahun_angka = date_match.group(3) if date_match.group(3) else str(CURRENT_YEAR)
                         dt = datetime.strptime(f"{date_match.group(1)} {date_match.group(2)[:3].capitalize()} {tahun_angka}", "%d %b %Y")
                         extracted_day = dt.strftime("%A")
                         formatted_date = dt.strftime("%d/%m/%Y")
@@ -235,6 +256,8 @@ if uploaded_files and st.button("🚀 Jalankan Ekstraksi", type="primary"):
 
             if not formatted_date:
                 st.error("⚠️ Tanggal tidak terdeteksi. Melewati file ini.")
+                for f_path in files_to_cleanup:
+                    if os.path.exists(f_path): os.remove(f_path)
                 continue
             else:
                 st.write(f"📅 Waktu Terdeteksi: **{formatted_date} ({extracted_day})**")
@@ -244,6 +267,7 @@ if uploaded_files and st.button("🚀 Jalankan Ekstraksi", type="primary"):
             if len(gems_found) != 3 or len(rewards_found) != 3:
                 st.warning("⚠️ Pembacaan normal gagal. Mencoba *Image Enhancement*...")
                 enhanced_path = enhance_image_for_ocr(temp_path)
+                files_to_cleanup.append(enhanced_path)
                 res_v2 = reader.readtext(enhanced_path, detail=0, text_threshold=0.4, low_text=0.3)
                 gems_found, rewards_found, _ = extract_gems_rewards(res_v2)
 
@@ -255,6 +279,8 @@ if uploaded_files and st.button("🚀 Jalankan Ekstraksi", type="primary"):
                 pairs = list(zip(gems_found, rewards_found))
             else:
                 st.error("❌ Ekstraksi angka gagal total. Silakan cek gambar manual.")
+                for f_path in files_to_cleanup:
+                    if os.path.exists(f_path): os.remove(f_path)
                 continue
 
             # ==================================================================
@@ -271,6 +297,9 @@ if uploaded_files and st.button("🚀 Jalankan Ekstraksi", type="primary"):
                     r_tier = row[0].strip().lower() if len(row) > 0 else ""
                     r_veh = row[1].strip().lower() if len(row) > 1 else ""
                     r_day = row[2].strip().lower() if len(row) > 2 else ""
+                    # NOTE: "This week" sheet has a known typo ("Wedesday") for Wednesday.
+                    # Fixing it here rather than in the sheet so re-typing doesn't silently
+                    # break matching again; ideally fix the source cell too.
                     if r_day == "wedesday": r_day = "wednesday"
 
                     if r_tier == cell_tier.lower() and r_veh == cell_vehicle.lower() and r_day == target_day:
@@ -292,6 +321,10 @@ if uploaded_files and st.button("🚀 Jalankan Ekstraksi", type="primary"):
                         st.info(f"➡️ Data kembaran **{cell_tier}-{cell_vehicle}** otomatis diisi di baris {start_row}-{end_row}.")
                 else:
                     st.error(f"❌ Baris kosong untuk {cell_tier}-{cell_vehicle} hari {extracted_day} tidak ditemukan.")
+
+            # Bersihkan file sementara agar temp_uploads/ tidak menumpuk
+            for f_path in files_to_cleanup:
+                if os.path.exists(f_path): os.remove(f_path)
 
         progress_bar.progress((idx + 1) / len(uploaded_files))
 

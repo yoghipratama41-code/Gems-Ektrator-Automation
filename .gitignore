@@ -1,0 +1,17 @@
+# Secrets - never commit real credentials
+.streamlit/secrets.toml
+.env
+
+# Runtime temp files created by the app
+temp_uploads/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS/editor cruft
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,7 @@
+streamlit>=1.32,<2.0
+easyocr>=1.7,<2.0
+gspread>=6.0,<7.0
+pandas>=2.0,<3.0
+Pillow>=10.0,<11.0
+google-generativeai>=0.5,<1.0
+google-auth>=2.25,<3.0
